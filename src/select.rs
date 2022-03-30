@@ -1,8 +1,9 @@
 use crate::attributes::ExpandedName;
-use cssparser::{self, CowRcStr, ParseError, SourceLocation, ToCss};
-use html5ever::{LocalName, Namespace};
 use crate::iter::{NodeIterator, Select};
 use crate::node_data_ref::NodeDataRef;
+use crate::tree::{ElementData, Node, NodeData, NodeRef};
+use cssparser::{self, CowRcStr, ParseError, SourceLocation, ToCss};
+use html5ever::{LocalName, Namespace};
 use selectors::attr::{AttrSelectorOperation, CaseSensitivity, NamespaceConstraint};
 use selectors::context::QuirksMode;
 use selectors::parser::SelectorParseErrorKind;
@@ -10,8 +11,9 @@ use selectors::parser::{
     NonTSPseudoClass, Parser, Selector as GenericSelector, SelectorImpl, SelectorList,
 };
 use selectors::{self, matching, OpaqueElement};
+use std::borrow::Borrow;
 use std::fmt;
-use crate::tree::{ElementData, Node, NodeData, NodeRef};
+use std::ops::Deref;
 
 /// The definition of whitespace per CSS Selectors Level 3 § 4.
 ///
@@ -22,12 +24,12 @@ static SELECTOR_WHITESPACE: &[char] = &[' ', '\t', '\n', '\r', '\x0C'];
 pub struct KuchikiSelectors;
 
 impl SelectorImpl for KuchikiSelectors {
-    type AttrValue = String;
-    type Identifier = LocalName;
-    type ClassName = LocalName;
-    type LocalName = LocalName;
-    type PartName = LocalName;
-    type NamespacePrefix = LocalName;
+    type AttrValue = Wrapper<String>;
+    type Identifier = Wrapper<LocalName>;
+    //type ClassName = LocalName;
+    type LocalName = Wrapper<LocalName>;
+    //type PartName = LocalName;
+    type NamespacePrefix = Wrapper<LocalName>;
     type NamespaceUrl = Namespace;
     type BorrowedNamespaceUrl = Namespace;
     type BorrowedLocalName = LocalName;
@@ -36,6 +38,71 @@ impl SelectorImpl for KuchikiSelectors {
     type PseudoElement = PseudoElement;
 
     type ExtraMatchingData = ();
+}
+
+#[derive(PartialEq, Eq, Debug, Clone)]
+pub struct Wrapper<T>(T);
+
+impl From<&str> for Wrapper<String> {
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
+}
+
+impl From<&str> for Wrapper<LocalName> {
+    fn from(s: &str) -> Self {
+        Self(s.into())
+    }
+}
+
+impl<T: Default> Default for Wrapper<T> {
+    fn default() -> Self {
+        Self(T::default())
+    }
+}
+
+impl AsRef<str> for Wrapper<String> {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Borrow<LocalName> for Wrapper<LocalName> {
+    fn borrow(&self) -> &LocalName {
+        &self.0
+    }
+}
+
+impl From<Wrapper<LocalName>> for LocalName {
+    fn from(wrapper: Wrapper<LocalName>) -> Self {
+        wrapper.0
+    }
+}
+
+impl<T> Deref for Wrapper<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl ToCss for Wrapper<LocalName> {
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
+    where
+        W: fmt::Write,
+    {
+        dest.write_str(&self.0)
+    }
+}
+
+impl ToCss for Wrapper<String> {
+    fn to_css<W>(&self, dest: &mut W) -> fmt::Result
+    where
+        W: fmt::Write,
+    {
+        dest.write_str(&self.0)
+    }
 }
 
 struct KuchikiParser;
@@ -102,11 +169,10 @@ impl NonTSPseudoClass for PseudoClass {
     }
 
     fn is_user_action_state(&self) -> bool {
-        matches!(*self, PseudoClass::Active | PseudoClass::Hover | PseudoClass::Focus)
-    }
-
-    fn has_zero_specificity(&self) -> bool {
-        false
+        matches!(
+            *self,
+            PseudoClass::Active | PseudoClass::Hover | PseudoClass::Focus
+        )
     }
 }
 
@@ -212,17 +278,12 @@ impl selectors::Element for NodeDataRef<ElementData> {
     }
 
     #[inline]
-    fn is_part(&self, _name: &LocalName) -> bool {
+    fn is_part(&self, _name: &Wrapper<LocalName>) -> bool {
         false
     }
 
     #[inline]
-    fn exported_part(&self, _: &LocalName) -> Option<LocalName> {
-        None
-    }
-
-    #[inline]
-    fn imported_part(&self, _: &LocalName) -> Option<LocalName> {
+    fn imported_part(&self, _: &Wrapper<LocalName>) -> Option<Wrapper<LocalName>> {
         None
     }
 
@@ -251,7 +312,7 @@ impl selectors::Element for NodeDataRef<ElementData> {
     }
 
     #[inline]
-    fn has_id(&self, id: &LocalName, case_sensitivity: CaseSensitivity) -> bool {
+    fn has_id(&self, id: &Wrapper<LocalName>, case_sensitivity: CaseSensitivity) -> bool {
         self.attributes
             .borrow()
             .get(local_name!("id"))
@@ -261,7 +322,7 @@ impl selectors::Element for NodeDataRef<ElementData> {
     }
 
     #[inline]
-    fn has_class(&self, name: &LocalName, case_sensitivity: CaseSensitivity) -> bool {
+    fn has_class(&self, name: &Wrapper<LocalName>, case_sensitivity: CaseSensitivity) -> bool {
         let name = name.as_bytes();
         !name.is_empty()
             && if let Some(class_attr) = self.attributes.borrow().get(local_name!("class")) {
@@ -277,15 +338,15 @@ impl selectors::Element for NodeDataRef<ElementData> {
     fn attr_matches(
         &self,
         ns: &NamespaceConstraint<&Namespace>,
-        local_name: &LocalName,
-        operation: &AttrSelectorOperation<&String>,
+        local_name: &Wrapper<LocalName>,
+        operation: &AttrSelectorOperation<&Wrapper<String>>,
     ) -> bool {
         let attrs = self.attributes.borrow();
         match *ns {
             NamespaceConstraint::Any => attrs
                 .map
                 .iter()
-                .any(|(name, attr)| name.local == *local_name && operation.eval_str(&attr.value)),
+                .any(|(name, attr)| name.local == **local_name && operation.eval_str(&attr.value)),
             NamespaceConstraint::Specific(ns_url) => attrs
                 .map
                 .get(&ExpandedName::new(ns_url, local_name.clone()))
